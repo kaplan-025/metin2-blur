@@ -1,0 +1,20 @@
+# Ignore
+/target
+**/*.rs.bk
+Cargo.lock.orig
+
+# 82 MB Windows ffmpeg: CI indirir, repoya girmez.
+/ffmpeg-win.exe
+/ffmpeg-win.exe.gz
+*.ppm
+*.mp4
+*.mkv
+*.avi
+*.webm
+
+# Build ciktilari
+/Metin2Blur.exe
+/dist
+
+# Actions is akisi: PAT icin "workflow" izni gerekiyor, elle ekleniyor
+/.github/workflows/

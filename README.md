@@ -1,0 +1,161 @@
+<div align="center">
+
+# Metin2 Blur
+
+**Local, offline video text redaction tool — tuned for Metin2 footage.**
+Single-file Windows executable. Nothing is uploaded anywhere.
+
+[English](README.md) · [Türkçe](README.tr.md)
+
+</div>
+
+![before / after](docs/demo.png)
+
+*Left: original 640×480 Metin2 capture. Right: the same frame after redaction — nameplates,
+floating damage numbers, chat and HUD labels are blurred. [Full demo video →](https://github.com/kaplan-025/metin2-blur/releases/download/v1.0.0/demo-redacted.mp4)*
+
+![UI](docs/ui.png)
+
+*Regions drawn on the preview (orange) are blurred unconditionally; green boxes are what automatic detection found at that frame.*
+
+---
+
+## What it does
+
+Takes a video file, finds the on-screen **text**, and blurs those regions in the
+output. Useful for redacting names, chat, and account identifiers from
+gameplay recordings before you share them — for bug reports, tickets to game
+support, VODs, or anything else where you do not want bystanders' or your own
+account names visible.
+
+It is a **redaction aid, not a guarantee**. Read [Limitations](#limitations)
+before you rely on it for anything sensitive, and re-check the output.
+
+## Why it works on Metin2 footage
+
+Detection is not OCR — no character recognition, no cloud, no model download.
+From the leaked client sources, Metin2 renders text in a very specific way:
+
+* `EterLib/GrpFontTexture.cpp` — glyphs are rasterised with
+  `ANTIALIASED_QUALITY`, **thresholded to a 1-bit mask**, uploaded as
+  `A4R4G4B4` and colour-modulated at draw time. On screen that means *flat
+  colour with soft edges*, not a texture.
+* `EterLib/GrpText.cpp` — font resources are `name:12.fnt`, `14i.fnt` (italic),
+  `18.fnt`; the default size is **12 px**.
+* `UserInterface/PythonTextTail.cpp` — nameplates use `SetOutline(true)` (black
+  outline) and draw a dark box behind the text, and the colours are a fixed
+  list (white player, red monster, `0xFFEFD4FF` guild, `CD661D`/`FFC125` guild
+  levels, `00FF7F`…`FF4500` level colours …).
+
+The pipeline follows from that:
+
+```
+frame → grayscale opening (erode→dilate) → top-hat / black-hat   ← thin-stroke response
+      ∪ Metin2 palette core match (5-bit LUT)                     ← colour-based recall
+      → horizontal run merge → connected components → line split
+      → size / density / row-gap / temporal-stability filters
+      → box blur per region → re-encode with ffmpeg
+```
+
+A *grayscale opening* is the key operator: unlike a plain local-contrast
+measure, it deletes thick bright areas (sky, UI panels) while **preserving the
+gaps between glyph strokes**, which is what makes it survive video compression
+and upscaling.
+
+> The palette match alone is **not** enough: H.264 with `yuv420p` chroma
+> subsampling shifts flat colours, so `(255,204,0)` gold drifts measurably away
+> from the reference value. That is why the structure channel carries the
+> detection and the palette only adds recall.
+
+## Install
+
+**Windows** — download `Metin2Blur.exe` from the releases page. That is the
+whole install: no ffmpeg, no Python, no redistributables. `ffmpeg.exe` is
+embedded in the binary and extracted to `%LOCALAPPDATA%\metin2-blur\` on first
+run. (If Windows SmartScreen warns on a freshly downloaded unsigned file, click
+*More info → Run anyway*.)
+
+**Linux** — needs ffmpeg on `PATH`:
+
+```bash
+cargo build --release
+./target/release/metin2-blur
+```
+
+## Use
+
+1. Drop the video onto the window, or paste a path and press **Yukle / Load**.
+2. Press **Onizle / Preview** — one frame is decoded, the detected text mask is
+   drawn red and the boxes green. This is the step that matters: if a name you
+   care about is not boxed, draw a region over it.
+3. Optionally set **Islem alani (ROI)** to the game window so wallpaper,
+   desktop widgets and other windows are ignored entirely.
+4. Press **Baslat / Start**. The progress bar shows `frame n/total`, speed, the
+   number of detected regions and an ETA. **Iptal / Cancel** stops it.
+
+### Regions: the reliable path
+
+Metin2's UI is at a **fixed position**, so a plain rectangle is often more
+reliable than automatic detection — and it never has false positives:
+
+* enable **Onizlemede bolge ciz / Draw region on preview** and drag a rectangle
+  over the chat, the HUD, the inventory, whatever you need; up to 4 regions.
+* Each region is blurred **unconditionally** on every frame.
+
+### Command line
+
+```
+Metin2Blur.exe --cli <video> [output] [sensitivity] [font_px] [roi] [mode] [regions]
+
+  sensitivity  0 = strict, 1 = catch everything        (default 0.55)
+  font_px      expected text height in video pixels   (default: 12 × height/768)
+  roi          x,y,w,h in percent of the frame        (0,0,100,100 = whole frame)
+  mode         both | palet | yapi(structure)
+  regions      x,y,w,h;x,y,w,h in percent — always blurred
+
+example:
+  Metin2Blur.exe --cli game.mp4 out.mp4 0.8 12 0,0,100,100 both 0,46,55,30;16,7,20,5
+```
+
+`FFMPEG=/path/to/ffmpeg` overrides the embedded binary.
+
+## Limitations
+
+Measured, not guessed — please read this part:
+
+* **Automatic detection is not 100 % on small, low-contrast text.** On a
+  640×480 desktop capture where the game window is 8 px tall, the contrast
+  distribution of 8 px text and of 3D scene texture *overlap*, so some floating
+  nameplates survive. Verified numbers: 4 of 7 sampled nameplate regions stayed
+  between 0.84 and 1.00 of their original sharpness.
+* It is much stronger on a full-screen capture (tested: 7/7 text regions reduced
+  to 0.01–0.04 of original sharpness, no false positives on the UI panel).
+* **Use regions for anything that must not be readable.** That is what the
+  fixed game layout is for.
+* Over-blurring is the failure mode: on textured scenes the tool can smear
+  parts of the 3D scenery. Lower the sensitivity if that bothers you, or
+  restrict the ROI.
+* Text taller than ~3.2 × `font_px` is treated as a UI panel and skipped.
+* 12 characters of palette tolerance is the practical floor (5-bit LUT).
+
+## Speed
+
+Measured on this machine (release build, 4 cores, ffmpeg encode included):
+~56 ms per frame of pure detection at 720p, ~9–11 fps end-to-end. Roughly
+3.5 minutes for a 45-second 30 fps capture. Detection is single-threaded;
+decoding and encoding run in parallel in ffmpeg.
+
+## Build from source
+
+```bash
+cargo test --release          # detector unit test + 720p benchmark
+cargo build --release
+./build-windows.sh            # needs rustup target + mingw-w64 + ffmpeg-win.exe
+```
+
+`ffmpeg-win.exe` is not in the repository (82 MB); the release workflow
+downloads it automatically.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
