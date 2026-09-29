@@ -66,7 +66,7 @@ impl App {
             probe: None,
             cfg: Cfg::default(),
             font_auto: true,
-            look_ahead: 2,
+            look_ahead: 3,
             hold: 6,
             safe_on: [false; 4],
             // x, y, genislik, yukseklik (yuzde): chat, orta isim seridi, minimap, tum ekran
@@ -93,7 +93,8 @@ impl App {
         match ffmpeg::probe(p) {
             Ok(pr) => {
                 if self.font_auto {
-                    self.cfg.font_px = 12.0 * pr.h as f32 / 768.0;
+                    let r = self.roi_pixels(pr.w, pr.h);
+                    self.cfg.font_px = auto_font_px(pr.w, pr.h, r);
                 }
                 self.cfg.merge_r = (self.cfg.font_px * 0.6).round().max(1.0) as usize;
                 self.input = path.to_string();
@@ -180,6 +181,20 @@ impl App {
         });
     }
 
+    fn roi_pixels(&self, w: usize, h: usize) -> Option<(usize, usize, usize, usize)> {
+        let (a, b, c, d) = (self.roi[0], self.roi[1], self.roi[2], self.roi[3]);
+        if (a, b, c, d) == (0, 0, 100, 100) {
+            return None;
+        }
+        let (px, py) = (a as f32 / 100.0 * w as f32, b as f32 / 100.0 * h as f32);
+        Some((
+            px as usize,
+            py as usize,
+            (px + c as f32 / 100.0 * w as f32) as usize,
+            (py + d as f32 / 100.0 * h as f32) as usize,
+        ))
+    }
+
     fn roi_rect(&self) -> Option<Rect> {
         if self.probe.is_none() {
             return None;
@@ -239,6 +254,19 @@ impl App {
     }
 }
 
+// Metin2 yazi 12 px @768. ROI verildiyse oyuncunun gorunur yuksekligi kullanilir
+// (masaustu kaydinda 415 px oyun penceresi -> 6.5 px). ROI yoksa karenin yuksekligi:
+// 1280x720 -> 11, dikey 720x1280 -> 20. min(w,h) denemesi yapildi, 720x1280
+// icin gercek yazi ~11 px olmasina ragmen kotu sonuc verdi (olcum: bilesen sayisi ve
+// bulanik alan) -- yukseklik formulu korundu.
+fn auto_font_px(_w: usize, h: usize, roi: Option<(usize, usize, usize, usize)>) -> f32 {
+    let ref_h = match roi {
+        Some((_x0, y0, _x1, y1)) => (y1.saturating_sub(y0)) as f32,
+        None => h as f32,
+    };
+    (12.0 * ref_h / 768.0).clamp(4.0, 40.0)
+}
+
 fn usage_exit() -> ! {
     eprintln!(
         "kullanim: metin2-blur --cli <video> [cikti] [hassasiyet] [font_px] [roi] [mod] [bolgeler]\n  roi: x,y,g,y yuzde (0,0,100,100 = tum ekran)\n  mod: ikisi | palet | yapi\n  bolgeler: x,y,g,y;x,y,g,y yuzde -> her zaman bulaniklasir"
@@ -280,7 +308,16 @@ impl eframe::App for App {
                         .hint_text("/home/kali/videos/metin2.mp4")
                         .desired_width(340.0),
                 );
-                if ui.button("Yukle").clicked() {
+                if self.font_auto {
+                if let Some(pr) = self.probe.clone() {
+                    let want = auto_font_px(pr.w, pr.h, self.roi_pixels(pr.w, pr.h));
+                    if (want - self.cfg.font_px).abs() > 0.6 {
+                        self.cfg.font_px = want;
+                        self.cfg.merge_r = (want * 0.6).round().max(1.0) as usize;
+                    }
+                }
+            }
+            if ui.button("Yukle").clicked() {
                     let p = self.input.clone();
                     self.load(&p);
                 }
@@ -371,6 +408,8 @@ impl eframe::App for App {
 
                 ui.label("Satir birlestirme (px)");
                 ui.add(egui::Slider::new(&mut self.cfg.merge_r, 0..=40));
+                ui.label("Bulaniklik gucu");
+                ui.add(egui::Slider::new(&mut self.cfg.blur_scale, 0.5..=3.0).text("1.6 = varsayilan"));
                 ui.label("Kutu genisletme (px)");
                 ui.add(egui::Slider::new(&mut self.cfg.margin_px, 0.0..=20.0));
                 ui.end_row();
@@ -620,11 +659,16 @@ fn main() -> eframe::Result {
         if let Some(f) = args.get(5) {
             cfg.font_px = f.parse().unwrap_or(cfg.font_px);
         } else if let Ok(pr) = ffmpeg::probe(Path::new(&input)) {
-            // Metin2 yazi 12 px @768; 1024x768 pencereden kucultulmus masaustu kaydinda
-            // yazi olceklenir, bu yuzden kullanici gerekirse elle verir
-            cfg.font_px = 12.0 * pr.h as f32 / 768.0;
+            cfg.font_px = auto_font_px(pr.w, pr.h, None);
         }
-        cfg.merge_r = (cfg.font_px * 0.6).round().max(1.0) as usize;
+        if let Ok(b) = std::env::var("M2_BLUR") {
+            cfg.blur_scale = b.parse().unwrap_or(cfg.blur_scale);
+        }
+        let mf: f32 = std::env::var("M2_MERGE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0.6);
+        cfg.merge_r = (cfg.font_px * mf).round().max(1.0) as usize;
         match args.get(7).map(|s| s.as_str()) {
             Some("palet") => cfg.mode = Mode::Palette,
             Some("yapi") => cfg.mode = Mode::Structure,
@@ -681,7 +725,7 @@ fn main() -> eframe::Result {
             input,
             output: output.clone(),
             cfg,
-            look_ahead: 2,
+            look_ahead: 3,
             hold: 6,
             extra_rects: extra,
         };

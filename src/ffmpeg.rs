@@ -261,8 +261,23 @@ pub fn run(job: Job, cancel: Arc<AtomicBool>, tx: Sender<Msg>) -> io::Result<()>
             }
             let boxes = det.detect(&buf, &job.cfg);
             if let Some(path) = std::env::var_os("M2_PPM") {
-                if n == 0 {
+                let want: u64 = std::env::var("M2_PPM_FRAME")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0);
+                let paint_mask = std::env::var_os("M2_PPM_MASK").is_some();
+                if n == want {
                     let mut img = buf.clone();
+                    if paint_mask {
+                        for i in 0..det.mask_ink.len() {
+                            if det.mask_ink[i] == 1 {
+                                let o = i * 3;
+                                img[o] = (img[o] as u32 * 2 / 5) as u8;
+                                img[o + 1] = 30;
+                                img[o + 2] = 30;
+                            }
+                        }
+                    }
                     for r in &boxes {
                         for (x, y) in [
                             (r.0, r.1), (r.2 - 1, r.1), (r.0, r.3 - 1), (r.2 - 1, r.3 - 1),
@@ -283,7 +298,9 @@ pub fn run(job: Job, cancel: Arc<AtomicBool>, tx: Sender<Msg>) -> io::Result<()>
                     f.write_all(&img).unwrap();
                 }
             }
-            if std::env::var_os("M2_BOXES").is_some() && (n < 2 || n == 25) {
+            if std::env::var_os("M2_BOXES").is_some()
+                && (n < 2 || n == std::env::var("M2_PPM_FRAME").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(25))
+            {
                 eprintln!("kare {n}: {} kutu {boxes:?}", boxes.len());
                 let (bw, bh) = (w / 100, h / 50);
                 for by in 0..50 {

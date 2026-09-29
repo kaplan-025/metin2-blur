@@ -67,6 +67,15 @@ and upscaling.
 > from the reference value. That is why the structure channel carries the
 > detection and the palette only adds recall.
 
+## Portrait captures (720x1280 phone recording)
+
+![portrait capture](docs/demo-vertical.png)
+
+On phone/portrait recordings the text drops to 10-12 px. Character name, item
+tooltip, Yang counter and chat were fully redacted in the measurement; part of a
+nameplate over bright scene texture can still survive (see
+[Limitations](#limitations)).
+
 ## Install
 
 **Windows** — download `Metin2Blur.exe` from the releases page. That is the
@@ -123,11 +132,18 @@ example:
 
 Measured, not guessed — please read this part:
 
-* **Automatic detection is not 100 % on small, low-contrast text.** On a
-  640×480 desktop capture where the game window is 8 px tall, the contrast
-  distribution of 8 px text and of 3D scene texture *overlap*, so some floating
-  nameplates survive. Verified numbers: 4 of 7 sampled nameplate regions stayed
-  between 0.84 and 1.00 of their original sharpness.
+* **Automatic detection is not 100 % — measured.** Two hard cases in Metin2:
+  * *Nameplates over a bright, textured 3D scene:* on a vertical 720×1280
+    capture the right half of the nameplate is redacted and the left half can
+    survive at %31 legibility. Reason: the dark-red glyphs (81,35,25) sit right
+    on the detection threshold over bright grass (response p90 = 59) and merge
+    with the scene texture.
+  * *Desktop capture with a small game window:* 8 px text and 3D texture have
+    overlapping contrast distributions, so some floating labels get through.
+  → Use **regions** for both (below); the game layout is fixed, so it is the
+  most reliable method. Measured improvement in v1.0.1 on the 720×1280 clip:
+  character name %4.5→%0.0, item tooltip %1.8→%0.2, Yang counter %9.6→%0.0,
+  chat %0→%0.
 * It is much stronger on a full-screen capture (tested: 7/7 text regions reduced
   to 0.01–0.04 of original sharpness, no false positives on the UI panel).
 * **Use regions for anything that must not be readable.** That is what the

@@ -46,6 +46,7 @@ pub struct Cfg {
     pub margin_px: f32,
     pub max_line_h: f32,
     pub min_density: f32,
+    pub blur_scale: f32,
     pub roi: Option<Rect>,
     pub stable_min: f32,
 }
@@ -60,8 +61,9 @@ impl Default for Cfg {
             margin_px: 3.0,
             max_line_h: 3.2,
             min_density: 0.03,
+            blur_scale: 1.6,
             roi: None,
-            stable_min: 0.6,
+            stable_min: 0.0,
         }
     }
 }
@@ -74,8 +76,10 @@ impl Cfg {
     pub fn palette_tol(&self) -> i32 {
         (34.0 - 20.0 * self.sensitivity.clamp(0.0, 1.0)) as i32
     }
+    // Kutu icin bulaniklik yaricapı. Kucuk/dusuk kontrastli yazida genis yaricap
+    // fark yaratiyor (olcum: ayni kutuda 4.7 px -> %80 okunur, 9 px -> %38).
     pub fn blur_radius(&self) -> usize {
-        (self.font_px * 0.42).round().max(2.0) as usize
+        (self.font_px * 0.45 * self.blur_scale).round().clamp(3.0, 24.0) as usize
     }
 }
 
@@ -150,13 +154,6 @@ impl Detector {
             }
         }
         self.pal_lut_tol = tol;
-    }
-
-    fn row_has_ink(&self, y: usize, x0: usize, x1: usize) -> bool {
-        (x0..x1).any(|x| {
-            let i = y * self.w + x;
-            self.con[i] == 1 || self.pal[i] == 1
-        })
     }
 
     // con | pal maskesinde bir kenar satirinda piksel var mi
@@ -340,18 +337,73 @@ impl Detector {
         let (mut r_h, mut r_area, mut r_dens, mut r_gap, mut r_stab, mut r_tight, mut r_ok) = (0, 0, 0, 0, 0, 0, 0);
         let mut out = Vec::new();
         for (_, (cx0, cy0, cx1, cy1)) in comps {
-            // cok satirli bloklar (chat, isim+seviye) bilesen olarak gelir: satir satir ayir
-            let mut y = cy0;
-            while y < cy1 {
-                while y < cy1 && !self.row_has_ink(y, cx0, cx1) {
-                    y += 1;
+            // Satirlari say: bos ya da seyrek satirlar bolucudur. Yazi, arka plan dokusuna
+            // baglandiginda bilesen dev olur; seyrek satirlardan bolerek yazi satirini
+            // ayiriyoruz (onceki surum max_h'i asan grubu TAMAMEN reddediyordu ->
+            // karakter basi isim etiketleri hic yakalanmiyordu).
+            let ch = cy1 - cy0;
+            let mut rowcnt = vec![0u32; ch];
+            for (i, yy) in (cy0..cy1).enumerate() {
+                let mut n = 0u32;
+                for x in cx0..cx1 {
+                    let k = yy * w + x;
+                    if self.con[k] == 1 || self.pal[k] == 1 {
+                        n += 1;
+                    }
                 }
-                let ly0 = y;
-                while y < cy1 && self.row_has_ink(y, cx0, cx1) {
-                    y += 1;
+                rowcnt[i] = n;
+            }
+            let peak = rowcnt.iter().copied().max().unwrap_or(0).max(1);
+            let cut = ((peak as f32 * 0.30) as u32).max(1);
+            // 1) dogal satir gruplari: BOS satirlar bolucudur
+            let mut groups: Vec<(usize, usize)> = Vec::new();
+            let mut start: Option<usize> = None;
+            for (i, &n) in rowcnt.iter().enumerate() {
+                if n > 0 {
+                    if start.is_none() {
+                        start = Some(i);
+                    }
+                } else if let Some(s) = start.take() {
+                    groups.push((cy0 + s, cy0 + i));
                 }
-                let ly1 = y;
-                if ly1 - ly0 < min_h || ly1 - ly0 > max_h || cx1 - cx0 < min_w {
+            }
+            if let Some(s) = start {
+                groups.push((cy0 + s, cy1));
+            }
+            // 2) cok uzun gruplar: seyrek satirlardan bol. Boylece arka plan dokusuna
+            //    karisip devlesen bilesen icindeki yazi satiri da atilmaz (onceki surum
+            //    max_h'i asan grubu TAMAMEN reddediyordu).
+            for _ in 0..8 {
+                let mut split_at = None;
+                for (gi, &(a, b)) in groups.iter().enumerate() {
+                    if b - a > max_h {
+                        let lo = a + min_h;
+                        let hi = b - min_h;
+                        if lo < hi {
+                            let mid = (lo..hi)
+                                .map(|y| (y, rowcnt[y - cy0]))
+                                .min_by_key(|(_, v)| *v)
+                                .map(|(y, _)| y);
+                            if let Some(m) = mid {
+                                split_at = Some((gi, m));
+                                break;
+                            }
+                        }
+                    }
+                }
+                match split_at {
+                    Some((gi, m)) => {
+                        let (a, b) = groups[gi];
+                        groups[gi] = (a, m);
+                        groups.insert(gi + 1, (m, b));
+                    }
+                    None => break,
+                }
+            }
+            let _ = cut;
+
+            for (ly0, ly1) in groups {
+                if ly1 - ly0 < min_h || cx1 - cx0 < min_w {
                     r_h += 1;
                     continue;
                 }
@@ -424,12 +476,6 @@ impl Detector {
                     r_stab += 1;
                     continue;
                 }
-                if dbg && self.seen >= STAB_K && r_ok == 1 {
-                    eprintln!(
-                        "bilesen={} red: h={r_h} alan={r_area} yogunluk={r_dens} bosluk={r_gap} kararli={r_stab} kutu={r_tight} | kabul={r_ok} font={} cerceve={:.0} esik_kar={:.2}",
-                        comps_len, cfg.font_px, self.frame_mean, cfg.stable_min
-                    );
-                }
                 r_ok += 1;
 
                 // birlestirme genislemesini geri al: kutu yazi cekirdeginin etrafina kenetlenir
@@ -467,6 +513,13 @@ impl Detector {
                 }
                 out.push((bx0, by0, bx1, by1));
             }
+        }
+        if dbg && self.seen % 30 == 1 {
+            eprintln!(
+                "bilesen={} satir_dene={} | red: h={r_h} alan={r_area} yogunluk={r_dens} bosluk={r_gap} kararli={r_stab} kutu={r_tight} | KABUL={r_ok} cikti={} font={:.1} min_h={} max_h={} min_w={}",
+                comps_len, r_h + r_area + r_dens + r_gap + r_stab + r_tight + r_ok,
+                out.len(), cfg.font_px, min_h, max_h, min_w
+            );
         }
         out
     }

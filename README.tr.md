@@ -65,6 +65,14 @@ parlak alanları (gökyüzü, arayüz panelleri) siler, glif çizgileri arasınd
 > referanstan uzaklaşıyor. Bu yüzden tespiti yapı yapı taşıyor, palet sadece
 > hatırlatma ekliyor.
 
+## Dikey kayitlar (720x1280 telefon kaydi)
+
+![dikey kayit](docs/demo-vertical.png)
+
+Telefon/portre kayitlarinda yazilar 10-12 px'e dusable. Karakter adi, item
+tooltip, Yang sayaci ve sohbet olcumde tamamen kapatildi; karakter basi isim
+etiketinin bir kismi kalmaya devam edebiliyor (bkz. [Sinirlar](#sinirlar)).
+
 ## Kurulum
 
 **Windows** — releases sayfasından `Metin2Blur.exe` indir. Kurulum tamamen bu:
@@ -121,11 +129,16 @@ Metin2Blur.exe --cli <video> [cikti] [hassasiyet] [font_px] [roi] [mod] [bolgele
 
 Tahmin değil, ölçüm — bu bölümü lütfen oku:
 
-* **Küçük ve düşük kontrastlı yazıda otomatik tespit %100 değil.** Oyun
-  penceresinin 8 px olduğu 640×480 masaüstü kaydında, 8 px yazı ile 3B sahne
-  dokusunun kontrast dağılımları **örtüşüyor**; bazı uçan isim etiketleri
-  geçiyor. Ölçülen değer: örneklenen 7 isim etiketi bölgesinden 4'ü orijinal
-  keskinliğinin 0.84–1.00 arasında kaldı.
+* **Otomatik tespit %100 değil — ölçülmüş.** Metin2'de iki sert durum var:
+  * *Karakter başı isim etiketi, parlak/dokulu 3B sahnenin üzerinde:* dikey
+    720×1280 kayıtta etiketin sağ yarısı bulanıklaşıyor, sol yarısı %31
+    okunabilirlikte kalabiliyor. Sebep: koyu kırmızı yazının (81,35,25) parlak
+    çim üzerindeki yerel tepkisi (p90 = 59) eşik sınırında ve dokuyla iç içe.
+  * *Masaüstü kaydı, küçük oyun penceresi:* 8 px yazı ile 3B dokunun kontrast
+    dağılımları örtüştüğü için bazı uçan etiketler geçebiliyor.
+  → Bu iki durumda **bölge çiz**; oyun düzeni sabit olduğu için en isabetli yöntem
+  o. v1.0.1'de ölçülen iyileşme (720×1280): karakter adı %4.5→%0.0, item
+  tooltip %1.8→%0.2, Yang sayacı %9.6→%0.0, sohbet %0→%0.
 * Tam ekran kaydında çok daha güçlü (test: 7/7 metin bölgesi orijinal
   keskinliğin 0.01–0.04'üne indi, arayüz panelinde yanlış pozitif yok).
 * **Okunamaması kesin olması gereken her şey için bölge kullan.** Sabit oyun
