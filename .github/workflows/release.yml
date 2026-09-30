@@ -1,0 +1,123 @@
+name: build
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-x64
+            os: windows-latest
+            target: x86_64-pc-windows-gnu
+          - name: linux-x64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup target add ${{ matrix.target }}
+
+      - name: Install Linux build deps
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Install mingw-w64 (Windows target)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: choco install mingw --no-progress -y
+
+      - name: Fetch ffmpeg.exe for embedding (Windows only)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          curl.exe -sSL -o ffmpeg-win.exe `
+            https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/ffmpeg-win32-x64
+          if (-not (Test-Path ffmpeg-win.exe)) { throw "ffmpeg indirilemedi" }
+
+      # 82 MB ffmpeg gomuluyken exe ~90 MB oluyor; UPX ile 21 MB'a iniyor
+      # (calisma aninda kendini acir, hicbir sey kurulmuyor). Sonuc exe ~29 MB.
+      - name: Pack ffmpeg with UPX (Windows only)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          curl.exe -sSL -o upx.zip `
+            https://github.com/upx/upx/releases/download/v4.2.4/upx-4.2.4-amd64_win64.zip
+          Expand-Archive -Force upx.zip
+          .\upx-4.2.4-amd64_win64\upx.exe --best --force ffmpeg-win.exe
+          "{0:N1} MB ffmpeg.exe" -f ((Get-Item ffmpeg-win.exe).Length / 1MB)
+
+      - name: Test
+        run: cargo test --release
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/metin2-blur dist/metin2-blur
+          tar czf dist/metin2-blur-linux-x64.tar.gz -C dist metin2-blur
+
+      - name: Package (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target/${{ matrix.target }}/release/metin2-blur.exe dist/Metin2Blur.exe
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: metin2-blur-${{ matrix.name }}
+          path: dist/
+
+  release:
+    name: release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Assemble assets
+        run: |
+          mkdir -p assets
+          cp dist/metin2-blur-windows-x64/Metin2Blur.exe assets/
+          cp dist/metin2-blur-linux-x64/metin2-blur-linux-x64.tar.gz assets/
+          if [ -f docs/demo-redacted.mp4 ]; then cp docs/demo-redacted.mp4 assets/demo-redacted.mp4; fi
+          ls -lh assets
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: assets/*
+          generate_release_notes: true
+          body: |
+            ## Metin2 Blur ${{ github.ref_name }}
+
+            Single-file offline video text redaction tool.
+            No install, no ffmpeg needed — it is embedded in the Windows binary.
+
+            * `Metin2Blur.exe` — Windows x64
+            * `metin2-blur-linux-x64.tar.gz` — Linux x64 (needs ffmpeg on PATH)
+
+            **Redaction aid, not a guarantee.** Automatic detection is not 100%
+            on small low-contrast text; use the region feature for anything that
+            must not be readable. See the README "Limitations" section.

@@ -15,6 +15,3 @@ Cargo.lock.orig
 # Build ciktilari
 /Metin2Blur.exe
 /dist
-
-# Actions is akisi: PAT icin "workflow" izni gerekiyor, elle ekleniyor
-/.github/workflows/
