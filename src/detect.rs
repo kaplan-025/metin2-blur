@@ -100,7 +100,6 @@ pub struct Detector {
     hist: Vec<u8>,
     hist_at: usize,
     seen: usize,
-    frame_mean: f32,
     pub mask_ink: Vec<u8>,
 }
 
@@ -124,7 +123,6 @@ impl Detector {
             hist: vec![0; n * STAB_K],
             hist_at: 0,
             seen: 0,
-            frame_mean: 1.0,
             mask_ink: vec![0; n],
         }
     }
@@ -181,12 +179,10 @@ impl Detector {
 
     pub fn detect(&mut self, frame: &[u8], cfg: &Cfg) -> Vec<Rect> {
         let (w, h, n) = (self.w, self.h, self.w * self.h);
-        for (c, ch) in self.ch.iter_mut().enumerate() {
-            for i in 0..n {
-                ch[i] = frame[i * 3 + c];
-            }
-        }
-
+        let mut _t = pnow();
+        // kanal ayirma asagida is parcaciklarinin icinde yapiliyor (ayri gecis
+        // kare basina 9-13 ms tutuyordu)
+        padd(P_SPLIT, _t);
         let thr = cfg.contrast_thr();
         let tol = cfg.palette_tol() as i32;
         let use_pal = cfg.mode != Mode::Structure;
@@ -199,40 +195,93 @@ impl Detector {
         // Acma, kalin parlakliklari (gok, panel) siler ve glif aralarini korur; 4:2:0 +
         // H.264 palet rengini bozsa bile yazi cekirdegi tepki verir.
         let r_open = (cfg.font_px * 0.18).round().max(1.0) as usize;
+        _t = pnow();
+        // 3 kanal birbirinden bagimsiz -> 3 is parcacigi. (Tek cekirdekte morfoloji
+        // kare basina 89 ms idi, bu makine 4 cekirdekli bir Ryzen.)
+        let (chp, thin) = (&mut self.ch, &mut self.thin);
+        let mut planes: [Vec<u8>; 3] = [
+            std::mem::take(&mut chp[0]),
+            std::mem::take(&mut chp[1]),
+            std::mem::take(&mut chp[2]),
+        ];
+        let mut dsts: [Vec<u8>; 3] = [
+            std::mem::take(&mut thin[0]),
+            std::mem::take(&mut thin[1]),
+            std::mem::take(&mut thin[2]),
+        ];
+        let mut outs: [(Vec<u8>, Vec<u8>); 3] = std::array::from_fn(|_| (Vec::new(), Vec::new()));
+        std::thread::scope(|sc| {
+            let mut hs = Vec::new();
+            for c in 0..3 {
+                let (mut src, mut dst) =
+                    (std::mem::take(&mut planes[c]), std::mem::take(&mut dsts[c]));
+                hs.push(sc.spawn(move || {
+                    // kanal ayirma da burada: ayri bir gecis kare basina 13 ms tutuyordu
+                    for i in 0..n {
+                        src[i] = frame[i * 3 + c];
+                    }
+                    let ero = morph_gray(&src, w, h, r_open, false);
+                    let opn = morph_gray(&ero, w, h, r_open, true);
+                    dst.fill(0);
+                    for i in 0..n {
+                        let v = src[i].saturating_sub(opn[i]).max(ero[i].saturating_sub(src[i]));
+                        if v > dst[i] {
+                            dst[i] = v;
+                        }
+                    }
+                    (src, dst)
+                }));
+            }
+            for (c, hh) in hs.into_iter().enumerate() {
+                outs[c] = hh.join().unwrap();
+            }
+        });
         for c in 0..3 {
-            self.thin[c].fill(0);
-            let ero = morph_gray(&self.ch[c], w, h, r_open, false);
-            let opn = morph_gray(&ero, w, h, r_open, true);
-            for i in 0..n {
-                let top = self.ch[c][i].saturating_sub(opn[i]);
-                let bot = ero[i].saturating_sub(self.ch[c][i]);
-                let v = top.max(bot);
-                if v > self.thin[c][i] {
-                    self.thin[c][i] = v;
+            chp[c] = std::mem::take(&mut outs[c].0);
+            thin[c] = std::mem::take(&mut outs[c].1);
+        }
+        padd(P_MORPH, _t);
+        _t = pnow();
+        // dal yok: mod secimini son anda maskeyle zorluyoruz, boylece dongu
+        // vektorlestirilebiliyor. Satir seritlerine bolunup paralel isleniyor
+        // (720p'de 7 ms -> ~2 ms).
+        let (pal_on, str_on) = (use_pal as u8, use_str as u8);
+        {
+            let (c0, c1, c2) = (&self.ch[0], &self.ch[1], &self.ch[2]);
+            let (t0, t1, t2) = (&self.thin[0], &self.thin[1], &self.thin[2]);
+            let lut = &self.pal_lut[..];
+            let rows = (h + 3) / 4;
+            let groups: Vec<(&mut [u8], &mut [u8], &mut [u8])> = self
+                .pal
+                .chunks_mut(rows * w)
+                .zip(self.con.chunks_mut(rows * w))
+                .zip(self.ink.chunks_mut(rows * w))
+                .map(|((a, b), c)| (a, b, c))
+                .collect();
+            std::thread::scope(|sc| {
+                for (k, (pc, cc, ic)) in groups.into_iter().enumerate() {
+                    // dilim indeksi yerel: kaynak dizilerdeki taban k*rows*w
+                    let base = k * rows * w;
+                    sc.spawn(move || {
+                        for i in 0..pc.len() {
+                            let j = base + i;
+                            let (r, g, b) = (c0[j], c1[j], c2[j]);
+                            let p = lut[((r as usize >> 3) << 10)
+                                | ((g as usize >> 3) << 5)
+                                | (b as usize >> 3)]
+                                & pal_on;
+                            let c = (((t0[j] as i32) >= thr) as u8
+                                | ((t1[j] as i32) >= thr) as u8
+                                | ((t2[j] as i32) >= thr) as u8)
+                                & str_on;
+                            pc[i] = p;
+                            cc[i] = c;
+                            ic[i] = p | c;
+                        }
+                    });
                 }
-            }
+            });
         }
-        self.pal.fill(0);
-        self.con.fill(0);
-        for i in 0..n {
-            let (r, g, b) = (self.ch[0][i], self.ch[1][i], self.ch[2][i]);
-            if use_pal {
-                self.pal[i] =
-                    self.pal_lut[((r as usize >> 3) << 10) | ((g as usize >> 3) << 5) | (b as usize >> 3)];
-            }
-            if use_str {
-                self.con[i] = ((self.thin[0][i] as i32) >= thr
-                    || (self.thin[1][i] as i32) >= thr
-                    || (self.thin[2][i] as i32) >= thr) as u8;
-            }
-        }
-
-        let mut lum = 0u64;
-        for i in 0..n {
-            self.ink[i] = (self.pal[i] | self.con[i]) as u8;
-            lum += ((self.ch[0][i] as u32 * 77 + self.ch[1][i] as u32 * 150 + self.ch[2][i] as u32 * 29) >> 8) as u64;
-        }
-        self.frame_mean = (lum as f32 / n as f32).max(1.0);
 
         // islem alani disini sifirla (masaustu kaydi: duvar kagidi, arac penceresi, gorev cubugu)
         if let Some(r) = cfg.roi {
@@ -259,16 +308,25 @@ impl Detector {
 
         // Zaman kararliligi: 3B sahne kayar, yazi sabit kalir. Gercek kayan pencere
         // (STAB_K karelik "bu pikel son STAB_K karede ne kadar ink idi" sayaci).
-        let hb = self.hist_at * n;
-        for i in 0..n {
-            let old = self.hist[hb + i];
-            let ink = self.ink[i];
-            self.hist[hb + i] = ink;
-            self.stability[i] = self.stability[i] + ink - old;
+        padd(P_MASK, _t);
+        _t = pnow();
+        // Varsayilan KAPALI: gecmeyi tutmak kare basina 8 ms tutuyordu ve
+        // yeni/hareketli yaziyi olduruyordu. Acikken de ayni yol.
+        let use_stab = cfg.stable_min > 0.0;
+        if use_stab {
+            let hb = self.hist_at * n;
+            for i in 0..n {
+                let old = self.hist[hb + i];
+                let ink = self.ink[i];
+                self.hist[hb + i] = ink;
+                self.stability[i] = self.stability[i] + ink - old;
+            }
+            self.hist_at = (self.hist_at + 1) % STAB_K;
         }
-        self.hist_at = (self.hist_at + 1) % STAB_K;
         self.seen += 1;
 
+        padd(P_STAB, _t);
+        _t = pnow();
         self.mask_ink.copy_from_slice(&self.ink);
 
         self.opened.copy_from_slice(&self.ink);
@@ -277,6 +335,8 @@ impl Detector {
         self.merged = dilate_h(&self.opened, w, h, cfg.merge_r);
 
         // bilesen etiketleme: satir run'lari uzerinden (piksel basina 9 komsu yerine run karsilastirmasi)
+        padd(P_MERGE, _t);
+        _t = pnow();
         let mut prev: Vec<(u32, u32, u32)> = Vec::new();
         let mut cur: Vec<(u32, u32, u32)> = Vec::new();
         let mut all: Vec<(u32, u32, u32, u32)> = Vec::new();
@@ -328,6 +388,8 @@ impl Detector {
             e.3 = e.3.max(y as usize + 1);
         }
 
+        padd(P_CC, _t);
+        _t = pnow();
         let min_h = (cfg.font_px * 0.3).max(2.0) as usize;
         let max_h = (cfg.font_px * cfg.max_line_h) as usize;
         let min_w = (cfg.font_px * 0.15).round().max(2.0) as usize;
@@ -455,26 +517,28 @@ impl Detector {
                 }
                 // yalnizca "bu piksel son K karede ink oldu" olanlar: ince yazida kutu
                 // alaninin %90'i arka plandir, onu saymazsak yazi da dusuk cikar
-                let mut acc = 0u32;
-                let mut cnt = 0u32;
-                for yy in ly0..ly1 {
-                    for x in cx0..cx1 {
-                        let v = self.stability[yy * w + x];
-                        if v > 0 {
-                            acc += v as u32;
-                            cnt += 1;
+                if use_stab {
+                    let mut acc = 0u32;
+                    let mut cnt = 0u32;
+                    for yy in ly0..ly1 {
+                        for x in cx0..cx1 {
+                            let v = self.stability[yy * w + x];
+                            if v > 0 {
+                                acc += v as u32;
+                                cnt += 1;
+                            }
                         }
                     }
-                }
-                let keff = STAB_K.min(self.seen) as f32;
-                let stabv = if cnt > 0 {
-                    (acc as f32 / cnt as f32) / keff
-                } else {
-                    0.0
-                };
-                if self.seen >= 4 && stabv < cfg.stable_min {
-                    r_stab += 1;
-                    continue;
+                    let keff = STAB_K.min(self.seen) as f32;
+                    let stabv = if cnt > 0 {
+                        (acc as f32 / cnt as f32) / keff
+                    } else {
+                        0.0
+                    };
+                    if self.seen >= 4 && stabv < cfg.stable_min {
+                        r_stab += 1;
+                        continue;
+                    }
                 }
                 r_ok += 1;
 
@@ -514,6 +578,7 @@ impl Detector {
                 out.push((bx0, by0, bx1, by1));
             }
         }
+        padd(P_LINES, _t);
         if dbg && self.seen % 30 == 1 {
             eprintln!(
                 "bilesen={} satir_dene={} | red: h={r_h} alan={r_area} yogunluk={r_dens} bosluk={r_gap} kararli={r_stab} kutu={r_tight} | KABUL={r_ok} cikti={} font={:.1} min_h={} max_h={} min_w={}",
@@ -700,4 +765,40 @@ mod tests {
         let pr = hit_ratio(&boxes, &panel);
         assert!(pr < 0.1, "GUI paneli yanlis pozitif ({pr:.2}): {boxes:?}");
     }
+}
+
+// ---- gecici profil (M2_TIME=1): asama sureleri ----
+pub const P_SPLIT: usize = 0;
+pub const P_MORPH: usize = 1;
+pub const P_MASK: usize = 2;
+pub const P_STAB: usize = 3;
+pub const P_MERGE: usize = 4;
+pub const P_CC: usize = 5;
+pub const P_LINES: usize = 6;
+pub const P_BLUR: usize = 7;
+pub const P_N: usize = 8;
+pub static PROF: [std::sync::atomic::AtomicU64; P_N] = [const { std::sync::atomic::AtomicU64::new(0) }; P_N];
+pub static PROF_N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[inline]
+pub fn pnow() -> std::time::Instant {
+    std::time::Instant::now()
+}
+#[inline]
+pub fn padd(i: usize, t0: std::time::Instant) {
+    use std::sync::atomic::Ordering::Relaxed;
+    PROF[i].fetch_add(t0.elapsed().as_nanos() as u64, Relaxed);
+}
+pub fn prof_dump() {
+    use std::sync::atomic::Ordering::Relaxed;
+    let n = PROF_N.load(Relaxed).max(1) as f64;
+    let names = ["kanal_ayir", "morfoloji", "maske", "kararlilik", "yatay_birlestir", "bilesen", "satirlar", "bulanik"];
+    let mut tot = 0.0;
+    print!("\n--- asama suresi (kare basina ms) ---\n");
+    for i in 0..P_N {
+        let ms = PROF[i].load(Relaxed) as f64 / n / 1e6;
+        tot += ms;
+        println!("  {:<18} {:6.2} ms", names[i], ms);
+    }
+    println!("  {:<18} {:6.2} ms", "TOPLAM", tot);
 }

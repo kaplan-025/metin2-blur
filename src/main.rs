@@ -40,6 +40,7 @@ struct App {
     font_auto: bool,
     look_ahead: usize,
     hold: usize,
+    detect_every: usize,
     safe_on: [bool; 4],
     safe: [Rect; 4],
     roi: [usize; 4],
@@ -68,6 +69,7 @@ impl App {
             font_auto: true,
             look_ahead: 3,
             hold: 6,
+            detect_every: 1,
             safe_on: [false; 4],
             // x, y, genislik, yukseklik (yuzde): chat, orta isim seridi, minimap, tum ekran
             safe: [(0, 62, 55, 30), (0, 25, 100, 40), (78, 0, 22, 18), (0, 0, 100, 100)],
@@ -168,6 +170,7 @@ impl App {
             look_ahead: self.look_ahead,
             hold: self.hold,
             extra_rects: extra,
+            detect_every: self.detect_every,
         };
         let (tx, rx) = channel();
         self.cancel = Some(Arc::new(AtomicBool::new(false)));
@@ -418,6 +421,8 @@ impl eframe::App for App {
                 ui.add(egui::Slider::new(&mut self.hold, 0..=30));
                 ui.label("Ileri bakis (kare)");
                 ui.add(egui::Slider::new(&mut self.look_ahead, 0..=10));
+                ui.label("Tespit kac karede bir (1 = en duyarli, 2-3 = hizli)");
+                ui.add(egui::Slider::new(&mut self.detect_every, 1..=4));
                 ui.end_row();
             });
 
@@ -692,15 +697,24 @@ fn main() -> eframe::Result {
                 }
             }
         }
+        // hiz: tespit kac karede bir yapilsin (1 = her kare)
+        let detect_every: usize = args
+            .get(10)
+            .and_then(|v| v.parse().ok())
+            .or_else(|| std::env::var("M2_EVERY").ok().and_then(|v| v.parse().ok()))
+            .unwrap_or(1)
+            .max(1);
         eprintln!(
-            "font_px={:.1} merge={} hassasiyet={:.2} esik={} palet_tol={} mod={:?} roi={:?}",
+            "font_px={:.1} merge={} hassasiyet={:.2} esik={} palet_tol={} mod={:?} roi={:?} tespit={} yaricap={}",
             cfg.font_px,
             cfg.merge_r,
             cfg.sensitivity,
             cfg.contrast_thr(),
             cfg.palette_tol(),
             cfg.mode,
-            cfg.roi
+            cfg.roi,
+            detect_every,
+            cfg.blur_radius()
         );
         // guvenli bolgeler: "x,y,g,y;x,y,g,y" (yuzde). Algilama kacirsa burasi her zaman bulaniklasir.
         let mut extra = Vec::new();
@@ -728,6 +742,7 @@ fn main() -> eframe::Result {
             look_ahead: 3,
             hold: 6,
             extra_rects: extra,
+            detect_every,
         };
         let erx = tx.clone();
         std::thread::spawn(move || {

@@ -1,4 +1,4 @@
-use crate::blur::blur_region;
+use crate::blur::BlurCtx;
 use crate::detect::{Cfg, Detector, Rect};
 use std::collections::VecDeque;
 use std::io::{self, Read, Write};
@@ -161,24 +161,15 @@ pub struct Job {
     pub look_ahead: usize,
     pub hold: usize,
     pub extra_rects: Vec<Rect>,
+    /// Tespit kac karede bir yapilsin. 1 = her kare (en duyarli).
+    /// >1: aradaki kareler son kutulari kullanir -> tespit maliyeti 1/N.
+    /// Yazı 2 kareden kisa ekranda kalirsa kacabilir; hiz icin.
+    pub detect_every: usize,
 }
 
 fn kill(c: &mut Child) {
     let _ = c.kill();
     let _ = c.wait();
-}
-
-fn apply_blur(buf: &mut [u8], w: usize, h: usize, rects: &[Rect], radius: usize) {
-    let pad = radius * 2;
-    for r in rects {
-        let x0 = r.0.saturating_sub(pad);
-        let y0 = r.1.saturating_sub(pad);
-        let x1 = (r.2 + pad).min(w);
-        let y1 = (r.3 + pad).min(h);
-        if x1 > x0 && y1 > y0 {
-            blur_region(buf, w, h, (x0, y0, x1, y1), radius);
-        }
-    }
 }
 
 pub fn run(job: Job, cancel: Arc<AtomicBool>, tx: Sender<Msg>) -> io::Result<()> {
@@ -241,6 +232,10 @@ pub fn run(job: Job, cancel: Arc<AtomicBool>, tx: Sender<Msg>) -> io::Result<()>
     let mut enc_stdin = enc.stdin.take().unwrap();
 
     let mut det = Detector::new(w, h);
+
+    let mut last_boxes: Vec<Rect> = Vec::new();
+
+    let mut bctx = BlurCtx::new(w, h);
     let radius = job.cfg.blur_radius();
     let mut buf = vec![0u8; fs];
     let mut queue: VecDeque<(Vec<u8>, Vec<Rect>)> = VecDeque::new();
@@ -259,7 +254,13 @@ pub fn run(job: Job, cancel: Arc<AtomicBool>, tx: Sender<Msg>) -> io::Result<()>
                 Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
                 Err(e) => return Err(e),
             }
-            let boxes = det.detect(&buf, &job.cfg);
+            let every = job.detect_every.max(1) as u64;
+            let boxes = if n % every == 0 || last_boxes.is_empty() {
+                last_boxes = det.detect(&buf, &job.cfg);
+                last_boxes.clone()
+            } else {
+                last_boxes.clone()
+            };
             if let Some(path) = std::env::var_os("M2_PPM") {
                 let want: u64 = std::env::var("M2_PPM_FRAME")
                     .ok()
@@ -327,8 +328,11 @@ pub fn run(job: Job, cancel: Arc<AtomicBool>, tx: Sender<Msg>) -> io::Result<()>
             }
             rects.extend(job.extra_rects.iter().copied());
             let mut out = frame;
-            apply_blur(&mut out, w, h, &rects, radius);
+            let _tb = crate::detect::pnow();
+            bctx.apply(&mut out, w, h, &rects, radius);
+            crate::detect::padd(crate::detect::P_BLUR, _tb);
             enc_stdin.write_all(&out)?;
+            crate::detect::PROF_N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
             let count = rects.len();
             history.push(own_boxes);
@@ -355,13 +359,16 @@ pub fn run(job: Job, cancel: Arc<AtomicBool>, tx: Sender<Msg>) -> io::Result<()>
             rects.extend(own.iter().copied());
             rects.extend(job.extra_rects.iter().copied());
             let mut out = frame;
-            apply_blur(&mut out, w, h, &rects, radius);
+            bctx.apply(&mut out, w, h, &rects, radius);
             enc_stdin.write_all(&out)?;
             n += 1;
         }
         Ok(())
     })();
 
+    if std::env::var_os("M2_TIME").is_some() {
+        crate::detect::prof_dump();
+    }
     if result.is_err() {
         kill(&mut dec);
         kill(&mut enc);

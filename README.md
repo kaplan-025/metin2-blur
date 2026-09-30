@@ -156,10 +156,26 @@ Measured, not guessed — please read this part:
 
 ## Speed
 
-Measured on this machine (release build, 4 cores, ffmpeg encode included):
-~56 ms per frame of pure detection at 720p, ~9–11 fps end-to-end. Roughly
-3.5 minutes for a 45-second 30 fps capture. Detection is single-threaded;
-decoding and encoding run in parallel in ffmpeg.
+Measured end-to-end (release build, AMD Ryzen 5 1600, 4 cores, ffmpeg
+decode+encode included). "1/N" = detection runs every Nth frame and the frames
+in between reuse the last boxes (`--cli ... 1/N`, or the *Detection every N
+frames* slider in the GUI).
+
+| Video | 1/1 | 1/2 | 1/3 |
+|---|---|---|---|
+| 640x480, 30 fps, 45.9 s | **23.2 s** (2.0x realtime) | 18.1 s (2.5x) | 16.3 s (2.8x) |
+| 720x1280, 30 fps, 6.6 s | 8.8 s (0.75x) | **6.6 s** (1.0x) | 6.0 s (1.1x) |
+| 1920x1080, 30 fps, 6.6 s | 17.7 s (0.37x) | 13.3 s (0.49x) | 11.9 s (0.55x) |
+
+Per frame at 720x1280: 20 ms morphology (3 threads), 17 ms blur (4 threads,
+merged boxes), 5 ms everything else. v1.0.1 needed 620 ms per frame on the same
+video - this build is **11-16x faster** with identical redaction (measured:
+nameplate 31.1 %, tooltip 0.4 %, chat 0.0 %, Yang counter 0.3 %).
+
+Realtime needs ~33 ms per 720p frame, so 640x480 runs comfortably faster than
+realtime and 720x1280 reaches it in 1/2 or 1/3 mode. 1080p does not reach
+realtime on 4 cores - scale the capture down, or use regions (a region is
+blurred on every frame regardless of the detection rate).
 
 ## Build from source
 

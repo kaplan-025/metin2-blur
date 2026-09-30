@@ -111,13 +111,14 @@ otomatik tespitten daha isabetlidir — üstelik yanlış pozitifi olmaz:
 ### Komut satırı
 
 ```
-Metin2Blur.exe --cli <video> [cikti] [hassasiyet] [font_px] [roi] [mod] [bolgeler]
+Metin2Blur.exe --cli <video> [cikti] [hassasiyet] [font_px] [roi] [mod] [bolgeler] [tespit_1/N]
 
   hassasiyet  0 = katı, 1 = her şeyi yakala            (varsayılan 0.55)
   font_px      videodaki beklenen yazı yüksekliği, px   (varsayılan: 12 × yükseklik/768)
   roi          yüzde x,y,g,y                           (0,0,100,100 = tüm ekran)
   mod          ikisi | palet | yapi
   bolgeler     yüzde x,y,g,y;x,y,g,y — hep bulanıklaştırılır
+  tespit_1/N   tespit kaç karede bir (1 = her kare, 2-3 = hızlı)
 
 örnek:
   Metin2Blur.exe --cli oyun.mp4 cikti.mp4 0.8 12 0,0,100,100 ikisi 0,46,55,30;16,7,20,5
@@ -150,9 +151,27 @@ Tahmin değil, ölçüm — bu bölümü lütfen oku:
 
 ## Hız
 
-Bu makinede ölçüldü (release, 4 çekirdek, ffmpeg kodlaması dahil): 720p'de
-saf tespit ~56 ms/kare, uçtan uca ~9–11 kare/sn. 45 saniyelik 30 fps kayıt
-kabaca 3,5 dakika. Tespit tek iş parçacıklı; çözme ve kodlama ffmpeg'de paralel.
+Uçtan uca ölçüldü (release, AMD Ryzen 5 1600, 4 çekirdek, ffmpeg çözme +
+kodlama dahil). "1/N" = tespit her N karede bir çalışıyor, ara kareler son
+kutuları kullanıyor (`--cli ... 1/N` ya da arayüzdeki *Tespit kaç karede bir*
+kaydırıcısı).
+
+| Video | 1/1 | 1/2 | 1/3 |
+|---|---|---|---|
+| 640x480, 30 fps, 45.9 sn | **23.2 sn** (2.0× gerçek zaman) | 18.1 sn (2.5×) | 16.3 sn (2.8×) |
+| 720x1280, 30 fps, 6.6 sn | 8.8 sn (0.75×) | **6.6 sn** (1.0×) | 6.0 sn (1.1×) |
+| 1920x1080, 30 fps, 6.6 sn | 17.7 sn (0.37×) | 13.3 sn (0.49×) | 11.9 sn (0.55×) |
+
+720x1280'de kare başına: 20 ms morfoloji (3 iş parçacığı), 17 ms bulanık (4
+iş parçacığı, birleştirilmiş kutular), 5 ms gerisi. v1.0.1 aynı video için
+620 ms/kare gerektiriyordu — bu sürüm **11–16× daha hızlı** ve redaksiyon
+birebir aynı (ölçülen: isim etiketi %31.1, tooltip %0.4, sohbet %0.0, Yang
+sayacı %0.3).
+
+Gerçek zaman için 720p'de kare başına ~33 ms gerekiyor: 640x480 rahatça gerçek
+zamanın üstünde, 720x1280 1/2 veya 1/3 modda erişiyor. 1080p 4 çekirdekte
+gerçek zamana ULAŞMIYOR — kaydı çözünürlüğü küçült ya da bölge kullan (bölge
+tespit hızından bağımsız olarak her karede bulanıklanır).
 
 ## Kaynaktan derleme
 
